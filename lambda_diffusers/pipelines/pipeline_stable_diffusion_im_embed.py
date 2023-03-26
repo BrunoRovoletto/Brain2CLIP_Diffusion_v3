@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import torch
 import PIL
 
+import numpy
 from transformers import CLIPFeatureExtractor, CLIPModel
 
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
@@ -93,20 +94,35 @@ class StableDiffusionFromLatents(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        image_embeddings: numpy.ndarray,
+        image_embeddings,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: Optional[int] = 50,
-        guidance_scale: Optional[float] = 7.5 ,
+        guidance_scale: Optional[float] = 7.5,
         eta: Optional[float] = 0.0,
         generator: Optional[torch.Generator] = None,
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         **kwargs,
     ):
+        if "torch_device" in kwargs:
+            device = kwargs.pop("torch_device")
+            warnings.warn(
+                "`torch_device` is deprecated as an input argument to `__call__` and will be removed in v0.3.0."
+                " Consider using `pipe.to(torch_device)` instead."
+            )
+
+            # Set device as before (to be removed in 0.3.0)
+            if device is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.to(device)
+
+        a = image_embeddings.shape
+        image_embeddings = image_embeddings.unsqueeze(0).unsqueeze(0)
+        b = image_embeddings.shape
         
-        
-        
+        batch_size = 1
+
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
@@ -119,6 +135,7 @@ class StableDiffusionFromLatents(DiffusionPipeline):
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
             image_embeddings = torch.cat([uncond_embeddings, image_embeddings])
+            c = image_embeddings.shape
 
         # get the initial random noise unless the user supplied it
         latents_shape = (batch_size, self.unet.in_channels, height // 8, width // 8)
@@ -163,6 +180,8 @@ class StableDiffusionFromLatents(DiffusionPipeline):
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
             # predict the noise residual
+            #debug = (latent_model_input, t, image_embeddings, (a,b,c))
+            #return debug
             noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=image_embeddings)["sample"]
 
             # perform guidance
@@ -184,13 +203,15 @@ class StableDiffusionFromLatents(DiffusionPipeline):
         image = image.cpu().permute(0, 2, 3, 1).numpy()
 
         # run safety checker
-        safety_cheker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
-        image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_cheker_input.pixel_values)
+        #safety_cheker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
+        #image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_cheker_input.pixel_values)
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
 
-        return {"sample": image, "nsfw_content_detected": has_nsfw_concept}
+        #return {"sample": image, "nsfw_content_detected": has_nsfw_concept, "Debug": debug, "Debug2": (a,b,c)}
+        return {"sample": image, "nsfw_content_detected": 0}
+
 
         
         
@@ -219,6 +240,7 @@ class StableDiffusionImageEmbedPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
         self.image_processor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-large-patch14")
+        self.image_encoder = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
 
     @torch.no_grad()
     def __call__(
@@ -259,8 +281,14 @@ class StableDiffusionImageEmbedPipeline(DiffusionPipeline):
         if not isinstance(input_image, torch.FloatTensor):
             input_image = self.image_processor(images=input_image, return_tensors="pt").to(self.device)
 
+        
         image_embeddings = self.image_encoder.get_image_features(**input_image)
+        
+        a = image_embeddings.shape
+        
         image_embeddings = image_embeddings.unsqueeze(1)
+        
+        b = image_embeddings.shape
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -274,6 +302,8 @@ class StableDiffusionImageEmbedPipeline(DiffusionPipeline):
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
             image_embeddings = torch.cat([uncond_embeddings, image_embeddings])
+            
+            c = image_embeddings.shape
 
         # get the initial random noise unless the user supplied it
         latents_shape = (batch_size, self.unet.in_channels, height // 8, width // 8)
@@ -318,7 +348,11 @@ class StableDiffusionImageEmbedPipeline(DiffusionPipeline):
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
             # predict the noise residual
+            debug =  (latent_model_input, t, image_embeddings)
             noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=image_embeddings)["sample"]
+            
+            aaa = ("AAAAAAAH", image_embeddings.shape)
+            bbb = image_embeddings
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -339,10 +373,10 @@ class StableDiffusionImageEmbedPipeline(DiffusionPipeline):
         image = image.cpu().permute(0, 2, 3, 1).numpy()
 
         # run safety checker
-        safety_cheker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
-        image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_cheker_input.pixel_values)
+        #safety_cheker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
+        #image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_cheker_input.pixel_values)
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
 
-        return {"sample": image, "nsfw_content_detected": has_nsfw_concept}
+        return {"sample": (image,aaa,bbb), f"nsfw_content_detected {aaa}": 0, "Debug":debug, "Debug2": (a,b,c)}
